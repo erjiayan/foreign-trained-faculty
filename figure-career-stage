@@ -1,0 +1,185 @@
+-- =============================================================================
+-- FIGURE 3 HETEROGENEITY #1 — CAREER STAGE
+--
+-- Adds annual academic rank to:
+--   foreign-phd.facultyraw.figure3_openalex_final
+--
+-- RankTypeId:
+--   1 = Full professor
+--   2 = Associate professor
+--   3 = Assistant professor
+--
+-- AADVersion is explicitly mapped to calendar year.
+-- =============================================================================
+
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.facultyraw.figure3_rank_heterogeneity`
+PARTITION BY year_date
+CLUSTER BY author_id, phd_type, rank_type_id AS
+
+
+WITH
+
+
+-- =============================================================================
+-- 1. MAP AARC VERSION TO CALENDAR YEAR
+-- =============================================================================
+
+aad_version_map AS (
+
+  SELECT 'AAD2011-1816' AS AADVersion, 2011 AS year UNION ALL
+  SELECT 'AAD2012-2020', 2012 UNION ALL
+  SELECT 'AAD2013-2021', 2013 UNION ALL
+  SELECT 'AAD2014-2022', 2014 UNION ALL
+  SELECT 'AAD2015-2023', 2015 UNION ALL
+  SELECT 'AAD2016-2024', 2016 UNION ALL
+  SELECT 'AAD2017-2025', 2017 UNION ALL
+  SELECT 'AAD2018-2026', 2018 UNION ALL
+  SELECT 'AAD2019-2027', 2019 UNION ALL
+  SELECT 'AAD2020-2040', 2020
+
+),
+
+
+-- =============================================================================
+-- 2. VALID AARC RANK RECORDS
+-- =============================================================================
+
+rank_raw AS (
+
+  SELECT
+
+    f.author_id,
+
+    m.year,
+
+    SAFE_CAST(
+      f.RankTypeId AS INT64
+    ) AS rank_type_id
+
+  FROM
+    `foreign-phd.unitanalysis.facultyraw_enriched` AS f
+
+  INNER JOIN
+    aad_version_map AS m
+
+    ON CAST(f.AADVersion AS STRING) = m.AADVersion
+
+  WHERE
+    f.author_id IS NOT NULL
+
+    AND SAFE_CAST(
+      f.RankTypeId AS INT64
+    ) IN (1, 2, 3)
+
+),
+
+
+-- =============================================================================
+-- 3. COUNT RANK OCCURRENCES WITHIN AUTHOR-YEAR
+--
+-- A faculty member may appear multiple times because of multiple units or
+-- other AARC records. We therefore identify the modal annual rank.
+-- =============================================================================
+
+rank_counts AS (
+
+  SELECT
+
+    author_id,
+    year,
+    rank_type_id,
+
+    COUNT(*) AS n_records
+
+  FROM
+    rank_raw
+
+  GROUP BY
+    author_id,
+    year,
+    rank_type_id
+
+),
+
+
+-- =============================================================================
+-- 4. MODAL ANNUAL RANK
+--
+-- If two ranks occur equally often in the same author-year, use the more
+-- senior rank as a deterministic tie-break:
+--
+--   1 = Full
+--   2 = Associate
+--   3 = Assistant
+-- =============================================================================
+
+rank_mode AS (
+
+  SELECT
+
+    author_id,
+    year,
+    rank_type_id
+
+  FROM
+    rank_counts
+
+  QUALIFY
+
+    ROW_NUMBER() OVER (
+
+      PARTITION BY
+        author_id,
+        year
+
+      ORDER BY
+        n_records DESC,
+        rank_type_id ASC
+
+    ) = 1
+
+),
+
+
+-- =============================================================================
+-- 5. ATTACH RANK TO FINAL FIGURE 3 AUTHOR-YEAR DATA
+--
+-- Nothing about the original Figure 3 construction is changed.
+-- =============================================================================
+
+joined AS (
+
+  SELECT
+
+    f.*,
+
+    r.rank_type_id,
+
+    CASE
+      WHEN r.rank_type_id = 1 THEN 'Full'
+      WHEN r.rank_type_id = 2 THEN 'Associate'
+      WHEN r.rank_type_id = 3 THEN 'Assistant'
+    END AS career_stage
+
+  FROM
+    `foreign-phd.facultyraw.figure3_openalex_final` AS f
+
+  INNER JOIN
+    rank_mode AS r
+
+    ON f.author_id = r.author_id
+    AND f.year = r.year
+
+)
+
+
+-- =============================================================================
+-- 6. FINAL
+-- =============================================================================
+
+SELECT *
+
+FROM joined
+;
