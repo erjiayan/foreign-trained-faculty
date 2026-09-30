@@ -1,0 +1,46 @@
+-- =============================================================================
+-- FIGURE 3 HETEROGENEITY #2
+-- INSTITUTIONAL RESEARCH ENVIRONMENT
+--
+-- Highest research:
+--     research_intensity_level = 1
+--
+-- Other institutions:
+--     2  = High research
+--     3  = Moderate research
+--    -2  = Non-research
+--
+-- Unknown/null excluded.
+--
+-- Nothing about the Figure 3 network or outcome construction is changed.
+-- =============================================================================
+
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.facultyraw.figure3_institution_heterogeneity`
+PARTITION BY year_date
+CLUSTER BY author_id, phd_type, institutional_stratum AS
+
+
+SELECT
+
+  f.*,
+
+  CASE
+
+    WHEN research_intensity_level = 1
+      THEN 'Highest research'
+
+    WHEN research_intensity_level IN (2, 3, -2)
+      THEN 'Other institutions'
+
+  END AS institutional_stratum
+
+
+FROM
+  `foreign-phd.facultyraw.figure3_openalex_final` AS f
+
+
+WHERE
+  research_intensity_level IN (1, 2, 3, -2)
+;
