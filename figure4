@@ -1,0 +1,702 @@
+-- ============================================================================
+-- FIGURE 4 — COGNITIVE POSITION AND ELITE SCIENTIFIC IMPACT
+--
+-- PANEL A
+--   1. Topic breadth
+--   2. Cognitive span
+--   3. Boundary spanning
+--
+-- PANEL B
+--   Prior-3-year cognitive reach -> current-year top-1% output
+--
+-- DESIGN
+--   Faculty-year t
+--   Prior cognitive portfolio = publications in t-3, t-2, t-1
+--   Current outcome             = publications in t
+--
+-- NO productivity covariates are included in the models.
+--
+-- FACULTY / PUBLICATION SPINE:
+--   foreign-phd.facultyraw.author_work_spine
+--
+-- SPINE FIELDS USED:
+--   aad_year
+--   author_id
+--   phd_country
+--   phd_type
+--   umbrella_domain
+--   Area
+--   TaxonomyLevel01Name
+--   InstitutionId
+--   research_intensity_level
+--   research_intensity_label
+--   control_code
+--   control_label
+--   work_id
+--   publication_year
+--   fwci
+--   is_top10
+--   is_top1
+--   author_position
+--   is_corresponding
+--
+-- OPENALEX TOPIC FIELDS:
+--   primary_topic.id
+--   primary_topic.subfield.id
+--   primary_topic.field.id
+--   primary_topic.domain.id
+-- ============================================================================
+
+
+CREATE OR REPLACE TABLE
+`foreign-phd.analysis.figure4_cognitive_author_year` AS
+
+
+WITH
+
+
+-- ============================================================================
+-- 1. CLEAN FACULTY-WORK SPINE
+--
+-- The spine is already contemporaneously linked:
+--   aad_year = faculty roster year
+--   publication_year = publication year
+--
+-- Keep only observations where the two years agree.
+-- ============================================================================
+
+spine AS (
+
+  SELECT DISTINCT
+
+    aad_year,
+    author_id,
+
+    phd_country,
+    phd_type,
+
+    umbrella_domain,
+    Area,
+    TaxonomyLevel01Name,
+
+    InstitutionId,
+
+    research_intensity_level,
+    research_intensity_label,
+
+    control_code,
+    control_label,
+
+    work_id,
+    publication_year,
+
+    fwci,
+    is_top10,
+    is_top1,
+
+    author_position,
+    is_corresponding
+
+  FROM `foreign-phd.facultyraw.author_work_spine`
+
+  WHERE aad_year BETWEEN 2011 AND 2020
+
+    AND publication_year = aad_year
+
+    AND author_id IS NOT NULL
+
+    AND work_id IS NOT NULL
+
+    AND phd_type IN ('domestic', 'foreign')
+
+),
+
+
+-- ============================================================================
+-- 2. OPENALEX TOPIC INFORMATION
+-- ============================================================================
+
+works_topic AS (
+
+  SELECT DISTINCT
+
+    id AS work_id,
+
+    publication_year,
+
+    primary_topic.id AS topic_id,
+
+    primary_topic.subfield.id AS subfield_id,
+
+    primary_topic.field.id AS field_id,
+
+    primary_topic.domain.id AS domain_id
+
+  FROM `subugoe-collaborative.openalex_walden.works`
+
+  WHERE publication_year BETWEEN 2011 AND 2020
+
+    AND primary_topic.id IS NOT NULL
+
+),
+
+
+-- ============================================================================
+-- 3. FACULTY-WORK FILE WITH TOPIC INFORMATION
+-- ============================================================================
+
+faculty_work AS (
+
+  SELECT DISTINCT
+
+    s.aad_year,
+    s.author_id,
+
+    s.phd_type,
+    s.phd_country,
+
+    s.umbrella_domain,
+    s.Area,
+    s.TaxonomyLevel01Name,
+
+    s.InstitutionId,
+
+    s.research_intensity_level,
+    s.research_intensity_label,
+
+    s.control_code,
+    s.control_label,
+
+    s.work_id,
+
+    s.fwci,
+    SAFE_CAST(s.is_top10 AS BOOL) AS is_top10,
+    SAFE_CAST(s.is_top1 AS BOOL) AS is_top1,
+
+    w.topic_id,
+    w.subfield_id,
+    w.field_id,
+    w.domain_id
+
+  FROM spine s
+
+  JOIN works_topic w
+
+    ON s.work_id = w.work_id
+   AND s.publication_year = w.publication_year
+
+),
+
+
+-- ============================================================================
+-- 4. CURRENT-YEAR AUTHOR OUTCOMES
+--
+-- These define the Panel B dependent variable.
+-- papers and top1_papers are NOT predictors.
+-- ============================================================================
+
+current_outcomes AS (
+
+  SELECT
+
+    aad_year,
+    author_id,
+
+    ANY_VALUE(phd_type) AS phd_type,
+    ANY_VALUE(phd_country) AS phd_country,
+
+    ANY_VALUE(umbrella_domain) AS umbrella_domain,
+    ANY_VALUE(Area) AS Area,
+    ANY_VALUE(TaxonomyLevel01Name) AS TaxonomyLevel01Name,
+
+    ANY_VALUE(InstitutionId) AS InstitutionId,
+
+    ANY_VALUE(research_intensity_level)
+      AS research_intensity_level,
+
+    ANY_VALUE(research_intensity_label)
+      AS research_intensity_label,
+
+    ANY_VALUE(control_code) AS control_code,
+    ANY_VALUE(control_label) AS control_label,
+
+    COUNT(DISTINCT work_id) AS papers,
+
+    COUNT(
+      DISTINCT IF(is_top1, work_id, NULL)
+    ) AS top1_papers
+
+  FROM faculty_work
+
+  GROUP BY
+
+    aad_year,
+    author_id
+
+),
+
+
+-- ============================================================================
+-- 5. PRIOR THREE-YEAR COGNITIVE PORTFOLIO
+--
+-- For faculty-year t:
+--   t-3
+--   t-2
+--   t-1
+--
+-- We explicitly use aad_year rather than year.
+-- ============================================================================
+
+prior3 AS (
+
+  SELECT DISTINCT
+
+    c.aad_year,
+    c.author_id,
+
+    c.phd_type,
+
+    c.umbrella_domain,
+    c.Area,
+    c.TaxonomyLevel01Name,
+
+    c.InstitutionId,
+
+    p.work_id,
+
+    p.topic_id,
+    p.subfield_id,
+    p.field_id,
+    p.domain_id
+
+  FROM current_outcomes c
+
+  JOIN faculty_work p
+
+    ON p.author_id = c.author_id
+
+   AND p.aad_year BETWEEN
+       c.aad_year - 3
+       AND
+       c.aad_year - 1
+
+),
+
+
+-- ============================================================================
+-- 6. AUTHOR-TOPIC COUNTS
+--
+-- Each work contributes once to its primary topic.
+-- ============================================================================
+
+author_topic_counts AS (
+
+  SELECT
+
+    aad_year,
+    author_id,
+
+    topic_id,
+
+    ANY_VALUE(subfield_id) AS subfield_id,
+    ANY_VALUE(field_id) AS field_id,
+    ANY_VALUE(domain_id) AS domain_id,
+
+    COUNT(DISTINCT work_id) AS topic_papers
+
+  FROM prior3
+
+  GROUP BY
+
+    aad_year,
+    author_id,
+    topic_id
+
+),
+
+
+-- ============================================================================
+-- 7. AUTHOR PRIOR-3-YEAR TOTAL
+-- ============================================================================
+
+author_totals AS (
+
+  SELECT
+
+    aad_year,
+    author_id,
+
+    SUM(topic_papers) AS prior3_papers
+
+  FROM author_topic_counts
+
+  GROUP BY
+
+    aad_year,
+    author_id
+
+),
+
+
+-- ============================================================================
+-- 8. TOPIC SHARES
+-- ============================================================================
+
+author_topic_shares AS (
+
+  SELECT
+
+    a.aad_year,
+    a.author_id,
+
+    a.topic_id,
+    a.subfield_id,
+    a.field_id,
+    a.domain_id,
+
+    a.topic_papers,
+
+    SAFE_DIVIDE(
+      a.topic_papers,
+      t.prior3_papers
+    ) AS topic_share
+
+  FROM author_topic_counts a
+
+  JOIN author_totals t
+
+    ON a.aad_year = t.aad_year
+   AND a.author_id = t.author_id
+
+  WHERE t.prior3_papers > 0
+
+),
+
+
+-- ============================================================================
+-- 9. PANEL A METRIC 1
+--
+-- TOPIC BREADTH
+--
+-- Effective number of topics:
+--
+--   exp[-sum(p_k ln p_k)]
+--
+-- Higher = more diversified cognitive portfolio.
+-- ============================================================================
+
+topic_breadth AS (
+
+  SELECT
+
+    aad_year,
+    author_id,
+
+    EXP(
+      -SUM(
+        topic_share * LN(topic_share)
+      )
+    ) AS topic_breadth
+
+  FROM author_topic_shares
+
+  WHERE topic_share > 0
+
+  GROUP BY
+
+    aad_year,
+    author_id
+
+),
+
+
+-- ============================================================================
+-- 10. PAIRWISE TOPIC DISTANCE
+--
+-- Hierarchical OpenAlex distance:
+--
+--   0 = same topic
+--   1 = different topic, same subfield
+--   2 = different subfield, same field
+--   3 = different field, same domain
+--   4 = different OpenAlex domain
+--
+-- Weight:
+--   p_i * p_j
+--
+-- Higher = greater cognitive separation within the portfolio.
+-- ============================================================================
+
+topic_pairs AS (
+
+  SELECT
+
+    a.aad_year,
+    a.author_id,
+
+    a.topic_id AS topic_a,
+    b.topic_id AS topic_b,
+
+    a.topic_share AS share_a,
+    b.topic_share AS share_b,
+
+    CASE
+
+      WHEN a.subfield_id = b.subfield_id
+        THEN 1
+
+      WHEN a.field_id = b.field_id
+        THEN 2
+
+      WHEN a.domain_id = b.domain_id
+        THEN 3
+
+      ELSE 4
+
+    END AS cognitive_distance
+
+  FROM author_topic_shares a
+
+  JOIN author_topic_shares b
+
+    ON a.aad_year = b.aad_year
+   AND a.author_id = b.author_id
+   AND a.topic_id < b.topic_id
+
+),
+
+
+cognitive_span AS (
+
+  SELECT
+
+    aad_year,
+    author_id,
+
+    SAFE_DIVIDE(
+
+      SUM(
+        share_a
+        * share_b
+        * cognitive_distance
+      ),
+
+      SUM(
+        share_a
+        * share_b
+      )
+
+    ) AS cognitive_span
+
+  FROM topic_pairs
+
+  GROUP BY
+
+    aad_year,
+    author_id
+
+),
+
+
+-- ============================================================================
+-- 11. PANEL A METRIC 3
+--
+-- BOUNDARY SPANNING
+--
+-- Identify the modal OpenAlex domain.
+--
+-- Boundary-spanning share =
+--   share of prior-3-year work outside modal domain.
+--
+-- This is intentionally different from cognitive span.
+-- ============================================================================
+
+domain_counts AS (
+
+  SELECT
+
+    aad_year,
+    author_id,
+
+    domain_id,
+
+    SUM(topic_papers) AS domain_papers
+
+  FROM author_topic_counts
+
+  GROUP BY
+
+    aad_year,
+    author_id,
+    domain_id
+
+),
+
+
+modal_domain AS (
+
+  SELECT
+
+    aad_year,
+    author_id,
+
+    domain_id AS modal_domain_id
+
+  FROM domain_counts
+
+  QUALIFY ROW_NUMBER() OVER (
+
+    PARTITION BY aad_year, author_id
+
+    ORDER BY
+      domain_papers DESC,
+      domain_id
+
+  ) = 1
+
+),
+
+
+boundary_spanning AS (
+
+  SELECT
+
+    a.aad_year,
+    a.author_id,
+
+    SAFE_DIVIDE(
+
+      SUM(
+        IF(
+          a.domain_id != m.modal_domain_id,
+          a.topic_papers,
+          0
+        )
+      ),
+
+      SUM(a.topic_papers)
+
+    ) AS boundary_spanning
+
+  FROM author_topic_counts a
+
+  JOIN modal_domain m
+
+    ON a.aad_year = m.aad_year
+   AND a.author_id = m.author_id
+
+  GROUP BY
+
+    a.aad_year,
+    a.author_id
+
+),
+
+
+-- ============================================================================
+-- 12. COMBINE COGNITIVE METRICS
+-- ============================================================================
+
+cognitive_metrics AS (
+
+  SELECT
+
+    b.aad_year,
+    b.author_id,
+
+    b.topic_breadth,
+
+    s.cognitive_span,
+
+    x.boundary_spanning
+
+  FROM topic_breadth b
+
+  LEFT JOIN cognitive_span s
+
+    ON b.aad_year = s.aad_year
+   AND b.author_id = s.author_id
+
+  LEFT JOIN boundary_spanning x
+
+    ON b.aad_year = x.aad_year
+   AND b.author_id = x.author_id
+
+),
+
+
+-- ============================================================================
+-- 13. FINAL AUTHOR-YEAR ANALYTICAL FILE
+--
+-- We retain only author-years with:
+--   current-year output
+--   complete prior-three-year cognitive metrics
+--
+-- Note:
+--   papers and top1_papers define the current-year grouped-binomial outcome.
+--   They are NOT included as controls.
+-- ============================================================================
+
+final AS (
+
+  SELECT
+
+    o.aad_year,
+    o.author_id,
+
+    o.phd_type,
+    o.phd_country,
+
+    o.umbrella_domain,
+    o.Area,
+    o.TaxonomyLevel01Name,
+
+    o.InstitutionId,
+
+    o.research_intensity_level,
+    o.research_intensity_label,
+
+    o.control_code,
+    o.control_label,
+
+    o.papers,
+    o.top1_papers,
+
+    SAFE_DIVIDE(
+      o.top1_papers,
+      o.papers
+    ) AS top1_rate,
+
+    c.topic_breadth,
+    c.cognitive_span,
+    c.boundary_spanning,
+
+    t.prior3_papers
+
+  FROM current_outcomes o
+
+  JOIN cognitive_metrics c
+
+    ON o.aad_year = c.aad_year
+   AND o.author_id = c.author_id
+
+  JOIN author_totals t
+
+    ON o.aad_year = t.aad_year
+   AND o.author_id = t.author_id
+
+  WHERE o.papers > 0
+
+    AND t.prior3_papers > 0
+
+    AND c.topic_breadth IS NOT NULL
+
+    AND c.cognitive_span IS NOT NULL
+
+    AND c.boundary_spanning IS NOT NULL
+
+)
+
+SELECT *
+
+FROM final;
