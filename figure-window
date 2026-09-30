@@ -1,0 +1,1141 @@
+-- =============================================================================
+-- FIGURE 3 — NETWORK-WINDOW ROBUSTNESS
+--
+-- PURPOSE
+--
+-- Test whether the Figure 3 network-reach result depends on the choice of
+-- prior-three-year network window.
+--
+-- NETWORK WINDOWS
+--
+--   prior1_degree:
+--       distinct collaborators in t-1
+--
+--   prior3_degree:
+--       distinct collaborators in t-3:t-1
+--       EXACT main Figure 3 definition
+--
+--   prior5_degree:
+--       distinct collaborators in t-5:t-1
+--
+-- OUTCOME
+--
+--   Current-year OpenAlex papers and top-1% papers, exactly as Figure 3.
+--
+-- IMPORTANT
+--
+--   OpenAlex history begins in 2006 so that the 2011 outcome year has a
+--   complete five-year lookback:
+--
+--       2011 <- 2006, 2007, 2008, 2009, 2010
+--
+-- No productivity control is constructed or used here.
+-- =============================================================================
+
+
+
+-- =============================================================================
+-- 1. COLLAPSE AARC AUTHOR-YEAR DATA
+-- =============================================================================
+
+CREATE OR REPLACE TEMP TABLE focal_author_year AS
+
+WITH base AS (
+
+  SELECT
+    author_id,
+    aad_year AS year,
+    phd_type,
+    phd_country,
+    umbrella_domain,
+    InstitutionId,
+    research_intensity_level,
+    research_intensity_label
+
+  FROM
+    `foreign-phd.facultyraw.author_year_dim_v2`
+
+  WHERE
+    aad_year BETWEEN 2011 AND 2020
+
+    AND author_id IS NOT NULL
+
+    AND phd_type IN (
+      'domestic',
+      'foreign'
+    )
+
+),
+
+
+-- -----------------------------------------------------------------------------
+-- PhD type
+-- -----------------------------------------------------------------------------
+
+phd_counts AS (
+
+  SELECT
+    author_id,
+    year,
+    phd_type,
+    COUNT(*) AS n
+
+  FROM base
+
+  GROUP BY
+    author_id,
+    year,
+    phd_type
+
+),
+
+
+phd_mode AS (
+
+  SELECT
+    author_id,
+    year,
+    phd_type
+
+  FROM phd_counts
+
+  QUALIFY ROW_NUMBER() OVER (
+
+    PARTITION BY
+      author_id,
+      year
+
+    ORDER BY
+      n DESC,
+      phd_type
+
+  ) = 1
+
+),
+
+
+-- -----------------------------------------------------------------------------
+-- PhD country
+-- -----------------------------------------------------------------------------
+
+country_counts AS (
+
+  SELECT
+    author_id,
+    year,
+    phd_country,
+    COUNT(*) AS n
+
+  FROM base
+
+  WHERE
+    phd_country IS NOT NULL
+
+  GROUP BY
+    author_id,
+    year,
+    phd_country
+
+),
+
+
+country_mode AS (
+
+  SELECT
+    author_id,
+    year,
+    phd_country
+
+  FROM country_counts
+
+  QUALIFY ROW_NUMBER() OVER (
+
+    PARTITION BY
+      author_id,
+      year
+
+    ORDER BY
+      n DESC,
+      phd_country
+
+  ) = 1
+
+),
+
+
+-- -----------------------------------------------------------------------------
+-- Domain
+-- -----------------------------------------------------------------------------
+
+domain_counts AS (
+
+  SELECT
+    author_id,
+    year,
+    umbrella_domain,
+    COUNT(*) AS n
+
+  FROM base
+
+  WHERE
+    umbrella_domain IS NOT NULL
+
+  GROUP BY
+    author_id,
+    year,
+    umbrella_domain
+
+),
+
+
+domain_mode AS (
+
+  SELECT
+    author_id,
+    year,
+    umbrella_domain AS primary_domain
+
+  FROM domain_counts
+
+  QUALIFY ROW_NUMBER() OVER (
+
+    PARTITION BY
+      author_id,
+      year
+
+    ORDER BY
+      n DESC,
+      umbrella_domain
+
+  ) = 1
+
+),
+
+
+-- -----------------------------------------------------------------------------
+-- Institution
+-- -----------------------------------------------------------------------------
+
+institution_counts AS (
+
+  SELECT
+    author_id,
+    year,
+    InstitutionId,
+    COUNT(*) AS n
+
+  FROM base
+
+  WHERE
+    InstitutionId IS NOT NULL
+
+  GROUP BY
+    author_id,
+    year,
+    InstitutionId
+
+),
+
+
+institution_mode AS (
+
+  SELECT
+    author_id,
+    year,
+    InstitutionId AS primary_institution_id
+
+  FROM institution_counts
+
+  QUALIFY ROW_NUMBER() OVER (
+
+    PARTITION BY
+      author_id,
+      year
+
+    ORDER BY
+      n DESC,
+      InstitutionId
+
+  ) = 1
+
+),
+
+
+-- -----------------------------------------------------------------------------
+-- Research intensity
+-- -----------------------------------------------------------------------------
+
+research_counts AS (
+
+  SELECT
+    author_id,
+    year,
+    research_intensity_level,
+    research_intensity_label,
+    COUNT(*) AS n
+
+  FROM base
+
+  GROUP BY
+    author_id,
+    year,
+    research_intensity_level,
+    research_intensity_label
+
+),
+
+
+research_mode AS (
+
+  SELECT
+    author_id,
+    year,
+    research_intensity_level,
+    research_intensity_label
+
+  FROM research_counts
+
+  QUALIFY ROW_NUMBER() OVER (
+
+    PARTITION BY
+      author_id,
+      year
+
+    ORDER BY
+      n DESC,
+      research_intensity_level,
+      research_intensity_label
+
+  ) = 1
+
+)
+
+
+SELECT
+
+  p.author_id,
+  p.year,
+  p.phd_type,
+
+  c.phd_country,
+
+  COALESCE(
+    d.primary_domain,
+    'Unknown'
+  ) AS primary_domain,
+
+  i.primary_institution_id,
+
+  r.research_intensity_level,
+
+  COALESCE(
+    r.research_intensity_label,
+    'Unknown'
+  ) AS research_intensity_label
+
+FROM phd_mode p
+
+LEFT JOIN country_mode c
+  ON p.author_id = c.author_id
+ AND p.year = c.year
+
+LEFT JOIN domain_mode d
+  ON p.author_id = d.author_id
+ AND p.year = d.year
+
+LEFT JOIN institution_mode i
+  ON p.author_id = i.author_id
+ AND p.year = i.year
+
+LEFT JOIN research_mode r
+  ON p.author_id = r.author_id
+ AND p.year = r.year
+;
+
+
+
+-- =============================================================================
+-- 2. FOCAL AUTHORS
+-- =============================================================================
+
+CREATE OR REPLACE TEMP TABLE focal_authors AS
+
+SELECT DISTINCT
+  author_id
+
+FROM focal_author_year
+;
+
+
+
+-- =============================================================================
+-- 3. OPENALEX WORKS CONTAINING FOCAL AUTHORS
+--
+-- IMPORTANT CHANGE FROM MAIN FIGURE 3:
+--
+--   Main Figure 3 starts in 2008.
+--
+--   Here we start in 2006 so that outcome year 2011 has a complete
+--   prior-five-year network.
+-- =============================================================================
+
+CREATE OR REPLACE TEMP TABLE focal_works AS
+
+SELECT DISTINCT
+
+  a.author.id AS focal_author_id,
+
+  w.id AS work_id,
+
+  w.publication_year AS year,
+
+  IFNULL(
+    w.citation_normalized_percentile.is_in_top_1_percent,
+    FALSE
+  ) AS is_top1
+
+FROM
+  `subugoe-collaborative.openalex_walden.works` w
+
+CROSS JOIN
+  UNNEST(w.authorships) a
+
+JOIN focal_authors f
+  ON a.author.id = f.author_id
+
+WHERE
+  w.publication_year BETWEEN 2006 AND 2020
+
+  AND a.author.id IS NOT NULL
+;
+
+
+
+-- =============================================================================
+-- 4. CURRENT-YEAR OUTPUT
+--
+-- Exactly the Figure 3 outcome.
+-- =============================================================================
+
+CREATE OR REPLACE TEMP TABLE output_year AS
+
+SELECT
+
+  focal_author_id AS author_id,
+
+  year,
+
+  COUNT(
+    DISTINCT work_id
+  ) AS papers,
+
+  COUNT(
+    DISTINCT IF(
+      is_top1,
+      work_id,
+      NULL
+    )
+  ) AS top1_papers
+
+FROM focal_works
+
+WHERE
+  year BETWEEN 2011 AND 2020
+
+GROUP BY
+  focal_author_id,
+  year
+;
+
+
+
+-- =============================================================================
+-- 5. ALL AUTHORS ON PAPERS CONTAINING FOCAL FACULTY
+--
+-- Collaborators are NOT restricted to AARC faculty.
+-- =============================================================================
+
+CREATE OR REPLACE TEMP TABLE work_authors AS
+
+SELECT DISTINCT
+
+  w.id AS work_id,
+
+  a.author.id AS author_id
+
+FROM
+  `subugoe-collaborative.openalex_walden.works` w
+
+CROSS JOIN
+  UNNEST(w.authorships) a
+
+JOIN (
+
+  SELECT DISTINCT
+    work_id
+
+  FROM focal_works
+
+) fw
+
+  ON w.id = fw.work_id
+
+WHERE
+  a.author.id IS NOT NULL
+;
+
+
+
+-- =============================================================================
+-- 6. FOCAL AUTHOR × YEAR × PAPER × COLLABORATOR
+-- =============================================================================
+
+CREATE OR REPLACE TEMP TABLE focal_collaborations AS
+
+SELECT DISTINCT
+
+  fw.focal_author_id AS author_id,
+
+  fw.year,
+
+  fw.work_id,
+
+  wa.author_id AS collaborator_id
+
+FROM focal_works fw
+
+JOIN work_authors wa
+  ON fw.work_id = wa.work_id
+
+WHERE
+  wa.author_id != fw.focal_author_id
+;
+
+
+
+-- =============================================================================
+-- 7. AUTHOR × YEAR × COLLABORATOR
+--
+-- One row per:
+--
+--   focal author
+--   calendar year
+--   collaborator
+--
+-- tie_weight = number of distinct shared papers in that year.
+-- =============================================================================
+
+CREATE OR REPLACE TEMP TABLE collaborator_year AS
+
+SELECT
+
+  author_id,
+
+  year,
+
+  collaborator_id,
+
+  COUNT(
+    DISTINCT work_id
+  ) AS tie_weight
+
+FROM focal_collaborations
+
+GROUP BY
+  author_id,
+  year,
+  collaborator_id
+;
+
+
+
+-- =============================================================================
+-- 8. NETWORK REACH — PRIOR 1 YEAR
+--
+-- Outcome year t receives collaborations in:
+--
+--     t - 1
+-- =============================================================================
+
+CREATE OR REPLACE TEMP TABLE network1 AS
+
+SELECT
+
+  b.author_id,
+
+  b.year AS outcome_year,
+
+  COUNT(
+    DISTINCT cy.collaborator_id
+  ) AS prior1_degree
+
+FROM focal_author_year b
+
+JOIN collaborator_year cy
+
+  ON b.author_id = cy.author_id
+
+ AND cy.year = b.year - 1
+
+GROUP BY
+  b.author_id,
+  outcome_year
+;
+
+
+
+-- =============================================================================
+-- 9. NETWORK REACH — PRIOR 3 YEARS
+--
+-- EXACT FIGURE 3 DEFINITION:
+--
+--     t - 3
+--     t - 2
+--     t - 1
+-- =============================================================================
+
+CREATE OR REPLACE TEMP TABLE network3 AS
+
+SELECT
+
+  b.author_id,
+
+  b.year AS outcome_year,
+
+  COUNT(
+    DISTINCT cy.collaborator_id
+  ) AS prior3_degree
+
+FROM focal_author_year b
+
+JOIN collaborator_year cy
+
+  ON b.author_id = cy.author_id
+
+ AND cy.year BETWEEN
+       b.year - 3
+       AND
+       b.year - 1
+
+GROUP BY
+  b.author_id,
+  outcome_year
+;
+
+
+
+-- =============================================================================
+-- 10. NETWORK REACH — PRIOR 5 YEARS
+--
+-- Outcome year t receives collaborations in:
+--
+--     t - 5 through t - 1
+-- =============================================================================
+
+CREATE OR REPLACE TEMP TABLE network5 AS
+
+SELECT
+
+  b.author_id,
+
+  b.year AS outcome_year,
+
+  COUNT(
+    DISTINCT cy.collaborator_id
+  ) AS prior5_degree
+
+FROM focal_author_year b
+
+JOIN collaborator_year cy
+
+  ON b.author_id = cy.author_id
+
+ AND cy.year BETWEEN
+       b.year - 5
+       AND
+       b.year - 1
+
+GROUP BY
+  b.author_id,
+  outcome_year
+;
+
+
+
+-- =============================================================================
+-- 11. FINAL WINDOW-ROBUSTNESS TABLE
+-- =============================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.facultyraw.figure3_network_window_robustness`
+
+PARTITION BY
+  year_date
+
+CLUSTER BY
+  author_id,
+  phd_type AS
+
+
+SELECT
+
+  -- ---------------------------------------------------------------------------
+  -- AUTHOR-YEAR
+  -- ---------------------------------------------------------------------------
+
+  b.author_id,
+
+  b.year,
+
+  DATE(
+    b.year,
+    1,
+    1
+  ) AS year_date,
+
+
+  -- ---------------------------------------------------------------------------
+  -- TRAINING / FACULTY CHARACTERISTICS
+  -- ---------------------------------------------------------------------------
+
+  b.phd_type,
+
+  b.phd_country,
+
+  b.primary_domain,
+
+  b.primary_institution_id,
+
+  b.research_intensity_level,
+
+  b.research_intensity_label,
+
+
+  -- ---------------------------------------------------------------------------
+  -- CURRENT-YEAR OUTCOME
+  -- ---------------------------------------------------------------------------
+
+  IFNULL(
+    o.papers,
+    0
+  ) AS papers,
+
+  IFNULL(
+    o.top1_papers,
+    0
+  ) AS top1_papers,
+
+  SAFE_DIVIDE(
+    o.top1_papers,
+    o.papers
+  ) AS top1_rate,
+
+
+  -- ---------------------------------------------------------------------------
+  -- PRIOR 1-YEAR NETWORK REACH
+  -- ---------------------------------------------------------------------------
+
+  n1.prior1_degree,
+
+  LN(
+    1
+    +
+    CAST(
+      n1.prior1_degree AS FLOAT64
+    )
+  ) AS prior1_log_degree,
+
+
+  -- ---------------------------------------------------------------------------
+  -- PRIOR 3-YEAR NETWORK REACH
+  --
+  -- This should reproduce the final Figure 3 measure.
+  -- ---------------------------------------------------------------------------
+
+  n3.prior3_degree,
+
+  LN(
+    1
+    +
+    CAST(
+      n3.prior3_degree AS FLOAT64
+    )
+  ) AS prior3_log_degree,
+
+
+  -- ---------------------------------------------------------------------------
+  -- PRIOR 5-YEAR NETWORK REACH
+  -- ---------------------------------------------------------------------------
+
+  n5.prior5_degree,
+
+  LN(
+    1
+    +
+    CAST(
+      n5.prior5_degree AS FLOAT64
+    )
+  ) AS prior5_log_degree,
+
+
+  -- ---------------------------------------------------------------------------
+  -- WINDOW-SPECIFIC PANEL B ELIGIBILITY
+  --
+  -- Same logic as Figure 3:
+  --
+  --   nonempty prior network
+  --   AND >= 1 current-year paper
+  -- ---------------------------------------------------------------------------
+
+  IF(
+    n1.prior1_degree IS NOT NULL
+    AND n1.prior1_degree > 0
+    AND IFNULL(o.papers, 0) > 0,
+    1,
+    0
+  ) AS panel_b_1yr_eligible,
+
+
+  IF(
+    n3.prior3_degree IS NOT NULL
+    AND n3.prior3_degree > 0
+    AND IFNULL(o.papers, 0) > 0,
+    1,
+    0
+  ) AS panel_b_3yr_eligible,
+
+
+  IF(
+    n5.prior5_degree IS NOT NULL
+    AND n5.prior5_degree > 0
+    AND IFNULL(o.papers, 0) > 0,
+    1,
+    0
+  ) AS panel_b_5yr_eligible,
+
+
+  -- ---------------------------------------------------------------------------
+  -- COMMON SAMPLE
+  --
+  -- Author-year must satisfy eligibility for ALL THREE windows.
+  --
+  -- This is important for distinguishing:
+  --
+  --   network-window sensitivity
+  --
+  -- from
+  --
+  --   sample-composition sensitivity.
+  -- ---------------------------------------------------------------------------
+
+  IF(
+
+    n1.prior1_degree IS NOT NULL
+    AND n1.prior1_degree > 0
+
+    AND n3.prior3_degree IS NOT NULL
+    AND n3.prior3_degree > 0
+
+    AND n5.prior5_degree IS NOT NULL
+    AND n5.prior5_degree > 0
+
+    AND IFNULL(o.papers, 0) > 0,
+
+    1,
+    0
+
+  ) AS panel_b_common_eligible
+
+
+FROM focal_author_year b
+
+
+LEFT JOIN output_year o
+
+  ON b.author_id = o.author_id
+
+ AND b.year = o.year
+
+
+LEFT JOIN network1 n1
+
+  ON b.author_id = n1.author_id
+
+ AND b.year = n1.outcome_year
+
+
+LEFT JOIN network3 n3
+
+  ON b.author_id = n3.author_id
+
+ AND b.year = n3.outcome_year
+
+
+LEFT JOIN network5 n5
+
+  ON b.author_id = n5.author_id
+
+ AND b.year = n5.outcome_year
+;
+
+
+
+-- =============================================================================
+-- 12. CRITICAL VALIDATION
+--
+-- The newly reconstructed prior-three-year measure should agree with
+-- figure3_openalex_final.
+-- =============================================================================
+
+SELECT
+
+  COUNT(*) AS matched_author_years,
+
+  COUNTIF(
+    w.prior3_degree = f.prior3_degree
+  ) AS exact_degree_matches,
+
+  SAFE_DIVIDE(
+
+    COUNTIF(
+      w.prior3_degree = f.prior3_degree
+    ),
+
+    COUNT(*)
+
+  ) AS exact_degree_match_rate,
+
+  COUNTIF(
+    w.panel_b_3yr_eligible = f.panel_b_eligible
+  ) AS exact_eligibility_matches,
+
+  SAFE_DIVIDE(
+
+    COUNTIF(
+      w.panel_b_3yr_eligible = f.panel_b_eligible
+    ),
+
+    COUNT(*)
+
+  ) AS exact_eligibility_match_rate
+
+FROM
+  `foreign-phd.facultyraw.figure3_network_window_robustness` w
+
+JOIN
+  `foreign-phd.facultyraw.figure3_openalex_final` f
+
+  ON w.author_id = f.author_id
+
+ AND w.year = f.year
+;
+
+
+
+-- =============================================================================
+-- 13. WINDOW-SPECIFIC SAMPLE DIAGNOSTICS
+-- =============================================================================
+
+SELECT
+
+  windowz,
+
+  author_years,
+
+  authors,
+
+  papers,
+
+  top1_papers,
+
+  SAFE_DIVIDE(
+    top1_papers,
+    papers
+  ) AS top1_rate,
+
+  mean_degree,
+
+  median_degree
+
+
+FROM (
+
+
+  -- ---------------------------------------------------------------------------
+  -- 1 YEAR
+  -- ---------------------------------------------------------------------------
+
+  SELECT
+
+    'Prior 1 year' AS windowz,
+
+    COUNT(*) AS author_years,
+
+    COUNT(
+      DISTINCT author_id
+    ) AS authors,
+
+    SUM(
+      papers
+    ) AS papers,
+
+    SUM(
+      top1_papers
+    ) AS top1_papers,
+
+    AVG(
+      prior1_degree
+    ) AS mean_degree,
+
+    APPROX_QUANTILES(
+      prior1_degree,
+      100
+    )[SAFE_OFFSET(50)] AS median_degree
+
+  FROM
+    `foreign-phd.facultyraw.figure3_network_window_robustness`
+
+  WHERE
+    panel_b_1yr_eligible = 1
+
+
+  UNION ALL
+
+
+  -- ---------------------------------------------------------------------------
+  -- 3 YEARS
+  -- ---------------------------------------------------------------------------
+
+  SELECT
+
+    'Prior 3 years' AS windowz,
+
+    COUNT(*) AS author_years,
+
+    COUNT(
+      DISTINCT author_id
+    ) AS authors,
+
+    SUM(
+      papers
+    ) AS papers,
+
+    SUM(
+      top1_papers
+    ) AS top1_papers,
+
+    AVG(
+      prior3_degree
+    ) AS mean_degree,
+
+    APPROX_QUANTILES(
+      prior3_degree,
+      100
+    )[SAFE_OFFSET(50)] AS median_degree
+
+  FROM
+    `foreign-phd.facultyraw.figure3_network_window_robustness`
+
+  WHERE
+    panel_b_3yr_eligible = 1
+
+
+  UNION ALL
+
+
+  -- ---------------------------------------------------------------------------
+  -- 5 YEARS
+  -- ---------------------------------------------------------------------------
+
+  SELECT
+
+    'Prior 5 years' AS windowz,
+
+    COUNT(*) AS author_years,
+
+    COUNT(
+      DISTINCT author_id
+    ) AS authors,
+
+    SUM(
+      papers
+    ) AS papers,
+
+    SUM(
+      top1_papers
+    ) AS top1_papers,
+
+    AVG(
+      prior5_degree
+    ) AS mean_degree,
+
+    APPROX_QUANTILES(
+      prior5_degree,
+      100
+    )[SAFE_OFFSET(50)] AS median_degree
+
+  FROM
+    `foreign-phd.facultyraw.figure3_network_window_robustness`
+
+  WHERE
+    panel_b_5yr_eligible = 1
+
+
+  UNION ALL
+
+
+  -- ---------------------------------------------------------------------------
+  -- COMMON SAMPLE
+  --
+  -- Sample information only.
+  -- ---------------------------------------------------------------------------
+
+  SELECT
+
+    'Common sample' AS windowz,
+
+    COUNT(*) AS author_years,
+
+    COUNT(
+      DISTINCT author_id
+    ) AS authors,
+
+    SUM(
+      papers
+    ) AS papers,
+
+    SUM(
+      top1_papers
+    ) AS top1_papers,
+
+    NULL AS mean_degree,
+
+    NULL AS median_degree
+
+  FROM
+    `foreign-phd.facultyraw.figure3_network_window_robustness`
+
+  WHERE
+    panel_b_common_eligible = 1
+
+)
+
+
+ORDER BY
+
+  CASE windowz
+
+    WHEN 'Prior 1 year'
+      THEN 1
+
+    WHEN 'Prior 3 years'
+      THEN 2
+
+    WHEN 'Prior 5 years'
+      THEN 3
+
+    WHEN 'Common sample'
+      THEN 4
+
+  END
+;
