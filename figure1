@@ -1,0 +1,129 @@
+CREATE OR REPLACE TABLE `foreign-phd.new.figure1_annual_metrics_r2-3`
+PARTITION BY year_date AS
+
+WITH spine_norm AS (
+  SELECT
+    aad_year AS year,
+    work_id,
+    author_id,
+    CASE
+      WHEN LOWER(phd_type) LIKE '%foreign%' THEN 'foreign'
+      WHEN LOWER(phd_type) LIKE '%domestic%' OR LOWER(phd_type) LIKE '%us%' THEN 'domestic'
+      ELSE NULL
+    END AS phd_group,
+    is_top1,
+    IFNULL(is_corresponding, FALSE) AS is_corresponding
+  FROM `foreign-phd.facultyraw.author_work_spine`
+  WHERE publication_year BETWEEN 2011 AND 2020
+    AND research_intensity_level = 2
+    OR research_intensity_level = 3
+),
+
+work_level AS (
+  SELECT
+    year,
+    work_id,
+    MAX(CASE WHEN phd_group = 'foreign' THEN 1 ELSE 0 END) AS has_foreign,
+    MAX(CASE WHEN phd_group = 'domestic' THEN 1 ELSE 0 END) AS has_domestic,
+    MAX(CASE WHEN phd_group = 'foreign' AND is_corresponding THEN 1 ELSE 0 END) AS has_corresp_foreign,
+    MAX(CASE WHEN phd_group = 'domestic' AND is_corresponding THEN 1 ELSE 0 END) AS has_corresp_domestic,
+    MAX(CASE WHEN is_top1 THEN 1 ELSE 0 END) AS is_top1
+  FROM spine_norm
+  WHERE phd_group IS NOT NULL
+  GROUP BY year, work_id
+),
+
+paper_counts AS (
+  SELECT
+    year,
+    COUNT(*) AS total_papers,
+
+    SUM(CASE WHEN has_foreign = 1 AND has_domestic = 0 THEN 1 ELSE 0 END) AS foreign_only_papers,
+    SUM(CASE WHEN has_domestic = 1 AND has_foreign = 0 THEN 1 ELSE 0 END) AS domestic_only_papers,
+    SUM(CASE WHEN has_foreign = 1 AND has_domestic = 1 THEN 1 ELSE 0 END) AS mixed_papers,
+
+    SUM(CASE WHEN is_top1 = 1 THEN 1 ELSE 0 END) AS top1_total,
+    SUM(CASE WHEN is_top1 = 1 AND has_foreign = 1 AND has_domestic = 0 THEN 1 ELSE 0 END) AS top1_foreign_only_papers,
+    SUM(CASE WHEN is_top1 = 1 AND has_domestic = 1 AND has_foreign = 0 THEN 1 ELSE 0 END) AS top1_domestic_only_papers,
+    SUM(CASE WHEN is_top1 = 1 AND has_foreign = 1 AND has_domestic = 1 THEN 1 ELSE 0 END) AS top1_mixed_papers,
+
+    SUM(CASE WHEN has_corresp_foreign = 1 AND has_corresp_domestic = 0 THEN 1 ELSE 0 END) AS corresp_foreign_only_papers,
+    SUM(CASE WHEN has_corresp_domestic = 1 AND has_corresp_foreign = 0 THEN 1 ELSE 0 END) AS corresp_domestic_only_papers,
+    SUM(CASE WHEN has_corresp_foreign = 1 AND has_corresp_domestic = 1 THEN 1 ELSE 0 END) AS corresp_mixed_papers,
+    SUM(CASE WHEN has_corresp_foreign = 1 OR has_corresp_domestic = 1 THEN 1 ELSE 0 END) AS corresp_total,
+
+    SUM(CASE WHEN is_top1 = 1 AND (has_corresp_foreign = 1 OR has_corresp_domestic = 1) THEN 1 ELSE 0 END) AS corresp_top1_total,
+    SUM(CASE WHEN is_top1 = 1 AND has_corresp_foreign = 1 AND has_corresp_domestic = 0 THEN 1 ELSE 0 END) AS corresp_top1_foreign_only_papers,
+    SUM(CASE WHEN is_top1 = 1 AND has_corresp_domestic = 1 AND has_corresp_foreign = 0 THEN 1 ELSE 0 END) AS corresp_top1_domestic_only_papers,
+    SUM(CASE WHEN is_top1 = 1 AND has_corresp_foreign = 1 AND has_corresp_domestic = 1 THEN 1 ELSE 0 END) AS corresp_top1_mixed_papers
+  FROM work_level
+  GROUP BY year
+),
+
+faculty_year AS (
+  SELECT
+    aad_year AS year,
+    DATE(aad_year, 1, 1) AS year_date,
+    COUNT(DISTINCT author_id) AS faculty_total,
+    COUNT(DISTINCT CASE
+      WHEN LOWER(phd_type) LIKE '%foreign%' THEN author_id
+    END) AS faculty_foreign,
+    COUNT(DISTINCT CASE
+      WHEN LOWER(phd_type) LIKE '%domestic%'
+        OR LOWER(phd_type) LIKE '%us%' THEN author_id
+    END) AS faculty_domestic
+  FROM `foreign-phd.facultyraw.author_year_dim_v2`
+  WHERE aad_year BETWEEN 2011 AND 2020
+    AND research_intensity_level = 1
+    AND is_highest_research = TRUE
+  GROUP BY year, year_date
+)
+
+SELECT
+  fy.year,
+  fy.year_date,
+
+  fy.faculty_total,
+  fy.faculty_foreign,
+  fy.faculty_domestic,
+  SAFE_DIVIDE(fy.faculty_foreign, fy.faculty_total) AS workforce_share_foreign,
+  SAFE_DIVIDE(fy.faculty_domestic, fy.faculty_total) AS workforce_share_domestic,
+
+  pc.total_papers,
+  pc.foreign_only_papers,
+  pc.domestic_only_papers,
+  pc.mixed_papers,
+  SAFE_DIVIDE(pc.foreign_only_papers + 0.5 * pc.mixed_papers, pc.total_papers) AS publication_share_foreign,
+  SAFE_DIVIDE(pc.domestic_only_papers + 0.5 * pc.mixed_papers, pc.total_papers) AS publication_share_domestic,
+
+  pc.top1_total,
+  pc.top1_foreign_only_papers,
+  pc.top1_domestic_only_papers,
+  pc.top1_mixed_papers,
+  SAFE_DIVIDE(pc.top1_foreign_only_papers + 0.5 * pc.top1_mixed_papers, pc.top1_total) AS top1_share_foreign,
+  SAFE_DIVIDE(pc.top1_domestic_only_papers + 0.5 * pc.top1_mixed_papers, pc.top1_total) AS top1_share_domestic,
+  SAFE_DIVIDE(
+    SAFE_DIVIDE(pc.top1_foreign_only_papers + 0.5 * pc.top1_mixed_papers, pc.top1_total),
+    SAFE_DIVIDE(fy.faculty_foreign, fy.faculty_total)
+  ) AS elite_dependency_ratio,
+
+  pc.corresp_total,
+  pc.corresp_foreign_only_papers,
+  pc.corresp_domestic_only_papers,
+  pc.corresp_mixed_papers,
+  SAFE_DIVIDE(pc.corresp_foreign_only_papers + 0.5 * pc.corresp_mixed_papers, pc.corresp_total) AS corresponding_share_foreign,
+  SAFE_DIVIDE(pc.corresp_domestic_only_papers + 0.5 * pc.corresp_mixed_papers, pc.corresp_total) AS corresponding_share_domestic,
+
+  pc.corresp_top1_total,
+  pc.corresp_top1_foreign_only_papers,
+  pc.corresp_top1_domestic_only_papers,
+  pc.corresp_top1_mixed_papers,
+  SAFE_DIVIDE(pc.corresp_top1_foreign_only_papers + 0.5 * pc.corresp_top1_mixed_papers, pc.corresp_top1_total) AS corresponding_top1_share_foreign,
+  SAFE_DIVIDE(pc.corresp_top1_domestic_only_papers + 0.5 * pc.corresp_top1_mixed_papers, pc.corresp_top1_total) AS corresponding_top1_share_domestic,
+  SAFE_DIVIDE(
+    SAFE_DIVIDE(pc.corresp_top1_foreign_only_papers + 0.5 * pc.corresp_top1_mixed_papers, pc.corresp_top1_total),
+    SAFE_DIVIDE(fy.faculty_foreign, fy.faculty_total)
+  ) AS corresponding_top1_dependency_ratio
+FROM faculty_year fy
+JOIN paper_counts pc
+USING (year);
