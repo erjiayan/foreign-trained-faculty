@@ -1,0 +1,338 @@
+-- Figure 2: heavy lifting in SQL
+-- Output tables:
+--   foreign-phd.facultyraw.figure2_panel_abc
+--   foreign-phd.facultyraw.figure2_model_source
+-- Models:
+--   foreign-phd.facultyraw.fig2_raw_model
+--   foreign-phd.facultyraw.fig2_field_model
+--   foreign-phd.facultyraw.fig2_inst_model
+--   foreign-phd.facultyraw.fig2_career_model
+--   foreign-phd.facultyraw.fig2_team_model
+
+--------------------------------------------------------------------------------
+-- Panels A-C summary table
+--------------------------------------------------------------------------------
+CREATE OR REPLACE TABLE `foreign-phd.new.figure2_panel_abc` AS
+WITH spine AS (
+  SELECT
+    aad_year,
+    author_id,
+    CASE
+      WHEN LOWER(phd_type) LIKE '%foreign%' THEN 'foreign'
+      WHEN LOWER(phd_type) LIKE '%domestic%' OR LOWER(phd_type) LIKE '%us%' THEN 'domestic'
+      ELSE NULL
+    END AS phd_group,
+    umbrella_domain,
+    research_intensity_label,
+    control_label,
+    work_id,
+    is_top1
+  FROM `foreign-phd.facultyraw.author_work_spine`
+  WHERE publication_year BETWEEN 2011 AND 2020
+),
+
+dim_rows AS (
+  SELECT 'umbrella_domain' AS dimension, umbrella_domain AS level, aad_year, author_id, phd_group, work_id, is_top1
+  FROM spine
+  UNION ALL
+  SELECT 'research_intensity' AS dimension, research_intensity_label AS level, aad_year, author_id, phd_group, work_id, is_top1
+  FROM spine
+  UNION ALL
+  SELECT 'institution_control' AS dimension, control_label AS level, aad_year, author_id, phd_group, work_id, is_top1
+  FROM spine
+),
+
+faculty_counts AS (
+  SELECT
+    dimension,
+    level,
+    COUNT(DISTINCT CONCAT(CAST(aad_year AS STRING), '|', CAST(author_id AS STRING))) AS faculty_n,
+    COUNT(DISTINCT CASE
+      WHEN phd_group = 'foreign' THEN CONCAT(CAST(aad_year AS STRING), '|', CAST(author_id AS STRING))
+    END) AS foreign_faculty_n
+  FROM dim_rows
+  WHERE phd_group IN ('foreign', 'domestic')
+  GROUP BY dimension, level
+),
+
+work_level AS (
+  SELECT
+    dimension,
+    level,
+    work_id,
+    MAX(IF(phd_group = 'foreign', 1, 0)) AS has_foreign,
+    MAX(IF(phd_group = 'domestic', 1, 0)) AS has_domestic,
+    MAX(IF(is_top1, 1, 0)) AS is_top1
+  FROM dim_rows
+  WHERE phd_group IN ('foreign', 'domestic')
+  GROUP BY dimension, level, work_id
+),
+
+work_counts AS (
+  SELECT
+    dimension,
+    level,
+    COUNT(*) AS paper_n,
+    SUM(
+      CASE
+        WHEN has_foreign = 1 AND has_domestic = 0 THEN 1.0
+        WHEN has_foreign = 1 AND has_domestic = 1 THEN 0.5
+        ELSE 0.0
+      END
+    ) AS foreign_paper_wt,
+    SUM(is_top1) AS top1_n,
+    SUM(
+      CASE
+        WHEN is_top1 = 1 AND has_foreign = 1 AND has_domestic = 0 THEN 1.0
+        WHEN is_top1 = 1 AND has_foreign = 1 AND has_domestic = 1 THEN 0.5
+        ELSE 0.0
+      END
+    ) AS foreign_top1_wt
+  FROM work_level
+  GROUP BY dimension, level
+)
+
+SELECT
+  f.dimension,
+  f.level,
+  f.faculty_n,
+  f.foreign_faculty_n,
+  SAFE_DIVIDE(f.foreign_faculty_n, f.faculty_n) AS faculty_share_foreign,
+  w.paper_n,
+  w.foreign_paper_wt,
+  SAFE_DIVIDE(w.foreign_paper_wt, w.paper_n) AS publication_share_foreign,
+  w.top1_n,
+  w.foreign_top1_wt,
+  SAFE_DIVIDE(w.foreign_top1_wt, w.top1_n) AS top1_share_foreign
+FROM faculty_counts f
+JOIN work_counts w
+USING (dimension, level)
+;
+
+--------------------------------------------------------------------------------
+-- Modeling source for panel D
+--------------------------------------------------------------------------------
+CREATE OR REPLACE TABLE `foreign-phd.new.figure2_model_source` AS
+WITH spine AS (
+  SELECT
+    aad_year,
+    author_id,
+    CASE
+      WHEN LOWER(phd_type) LIKE '%foreign%' THEN 1
+      ELSE 0
+    END AS foreign_flag,
+    umbrella_domain,
+    InstitutionId,
+    research_intensity_label,
+    control_label,
+    work_id,
+    publication_year,
+    IFNULL(is_top1, FALSE) AS is_top1
+  FROM `foreign-phd.facultyraw.author_work_spine`
+  WHERE publication_year BETWEEN 2011 AND 2020
+    AND is_top1 IS NOT NULL
+),
+
+bridge AS (
+  SELECT DISTINCT
+    author_id,
+    PersonId
+  FROM `foreign-phd.analysis.author_person_bridge`
+  WHERE author_id IS NOT NULL
+    AND PersonId IS NOT NULL
+),
+
+ranked AS (
+  SELECT
+    s.*,
+    COALESCE(
+      CASE fr.RankTypeId
+        WHEN 1 THEN 'assistant'
+        WHEN 2 THEN 'associate'
+        WHEN 3 THEN 'full'
+        ELSE 'other'
+      END,
+      'unknown'
+    ) AS career_stage
+  FROM spine s
+  LEFT JOIN bridge b
+    ON s.author_id = b.author_id
+  LEFT JOIN `foreign-phd.analysis.faculty_rank_year` fr
+    ON b.PersonId = fr.PersonId
+   AND s.aad_year = fr.aad_year
+),
+
+work_team AS (
+  SELECT
+    work_id,
+    COUNT(DISTINCT author_id) AS team_size,
+    CASE
+      WHEN MAX(foreign_flag) = 1 AND MIN(foreign_flag) = 1 THEN 'foreign_only'
+      WHEN MAX(foreign_flag) = 0 AND MIN(foreign_flag) = 0 THEN 'domestic_only'
+      ELSE 'mixed'
+    END AS team_type
+  FROM ranked
+  GROUP BY work_id
+)
+
+SELECT
+  CAST(publication_year AS STRING) AS publication_year,
+  CAST(foreign_flag AS INT64) AS foreign_flag,
+  umbrella_domain,
+  CAST(InstitutionId AS STRING) AS InstitutionId,
+  CAST(research_intensity_label AS STRING) AS research_intensity_label,
+  CAST(control_label AS STRING) AS control_label,
+  career_stage,
+  team_type,
+  CASE
+    WHEN team_size = 1 THEN '1'
+    WHEN team_size = 2 THEN '2'
+    WHEN team_size BETWEEN 3 AND 5 THEN '3-5'
+    WHEN team_size BETWEEN 6 AND 10 THEN '6-10'
+    ELSE '11+'
+  END AS team_size_bucket,
+  CAST(is_top1 AS INT64) AS is_top1
+FROM ranked r
+LEFT JOIN work_team wt
+  ON r.work_id = wt.work_id
+;
+
+--------------------------------------------------------------------------------
+-- Nested BigQuery ML models for decomposition
+--------------------------------------------------------------------------------
+CREATE OR REPLACE MODEL `foreign-phd.new.fig2_raw_model`
+OPTIONS(
+  model_type = 'logistic_reg',
+  input_label_cols = ['is_top1'],
+  auto_class_weights = TRUE,
+  l2_reg = 1.0
+) AS
+SELECT
+  is_top1,
+  foreign_flag
+FROM `foreign-phd.new.figure2_model_source`
+;
+
+CREATE OR REPLACE MODEL `foreign-phd.new.fig2_field_model`
+OPTIONS(
+  model_type = 'logistic_reg',
+  input_label_cols = ['is_top1'],
+  auto_class_weights = TRUE,
+  l2_reg = 1.0
+) AS
+SELECT
+  is_top1,
+  foreign_flag,
+  publication_year,
+  umbrella_domain
+FROM `foreign-phd.new.figure2_model_source`
+;
+
+CREATE OR REPLACE MODEL `foreign-phd.new.fig2_inst_model`
+OPTIONS(
+  model_type = 'logistic_reg',
+  input_label_cols = ['is_top1'],
+  auto_class_weights = TRUE,
+  l2_reg = 1.0
+) AS
+SELECT
+  is_top1,
+  foreign_flag,
+  publication_year,
+  umbrella_domain,
+  InstitutionId,
+  research_intensity_label,
+  control_label
+FROM `foreign-phd.new.figure2_model_source`
+;
+
+CREATE OR REPLACE MODEL `foreign-phd.new.fig2_career_model`
+OPTIONS(
+  model_type = 'logistic_reg',
+  input_label_cols = ['is_top1'],
+  auto_class_weights = TRUE,
+  l2_reg = 1.0
+) AS
+SELECT
+  is_top1,
+  foreign_flag,
+  publication_year,
+  umbrella_domain,
+  InstitutionId,
+  research_intensity_label,
+  control_label,
+  career_stage
+FROM `foreign-phd.new.figure2_model_source`
+;
+
+CREATE OR REPLACE MODEL `foreign-phd.new.fig2_team_model`
+OPTIONS(
+  model_type = 'logistic_reg',
+  input_label_cols = ['is_top1'],
+  auto_class_weights = TRUE,
+  l2_reg = 1.0
+) AS
+SELECT
+  is_top1,
+  foreign_flag,
+  publication_year,
+  umbrella_domain,
+  InstitutionId,
+  research_intensity_label,
+  control_label,
+  career_stage,
+  team_type,
+  team_size_bucket
+FROM `foreign-phd.new.figure2_model_source`
+;
+
+-- Build a compact model table for Figure 2 Panel D
+-- One row per covariate combination, with counts for weighted GLM
+
+CREATE OR REPLACE TABLE `foreign-phd.new.figure2_model_agg` AS
+WITH src AS (
+  SELECT
+    CAST(publication_year AS STRING) AS publication_year,
+    CAST(foreign AS INT64) AS foreign_flag,
+    umbrella_domain AS domain,
+    CAST(InstitutionId AS STRING) AS InstitutionId,
+    CAST(research_intensity_label AS STRING) AS research_intensity_label,
+    CAST(control_label AS STRING) AS control_label,
+    CAST(career_stage AS STRING) AS career_stage,
+    CAST(team_type AS STRING) AS team_type,
+    CAST(team_size AS INT64) AS team_size,
+    CAST(is_top1 AS INT64) AS is_top1
+  FROM `foreign-phd.new.figure2_decomp_source`
+  WHERE is_top1 IS NOT NULL
+)
+
+SELECT
+  publication_year,
+  foreign_flag,
+  domain,
+  InstitutionId,
+  research_intensity_label,
+  control_label,
+  career_stage,
+  team_type,
+  CASE
+    WHEN team_size = 1 THEN '1'
+    WHEN team_size = 2 THEN '2'
+    WHEN team_size BETWEEN 3 AND 5 THEN '3-5'
+    WHEN team_size BETWEEN 6 AND 10 THEN '6-10'
+    ELSE '11+'
+  END AS team_size_bucket,
+  COUNT(*) AS n_rows,
+  SUM(is_top1) AS top1_rows
+FROM src
+GROUP BY
+  publication_year,
+  foreign_flag,
+  domain,
+  InstitutionId,
+  research_intensity_label,
+  control_label,
+  career_stage,
+  team_type,
+  team_size_bucket
+;
