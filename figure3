@@ -1,0 +1,1074 @@
+-- =============================================================================
+-- FIGURE 3 — FINAL OPENALEX SOCIAL-NETWORK DATA
+--
+-- PURPOSE
+--   Construct the definitive author-year analytical dataset for Figure 3.
+--
+-- POPULATION
+--   AARC-linked U.S. faculty.
+--
+-- TRAINING ORIGIN
+--   AARC PhD institution country:
+--       domestic = U.S.-trained
+--       foreign  = foreign-trained
+--
+-- NETWORK DATA
+--   OpenAlex coauthorships.
+--
+-- IMPACT OUTCOME
+--   OpenAlex citation-normalized top-1% papers.
+--
+-- TEMPORAL DESIGN
+--
+--   Outcome year:
+--       t
+--
+--   Network exposure:
+--       union of collaborations observed in t-3, t-2, t-1
+--
+-- IMPORTANT
+--
+--   We DO NOT require the focal author to collaborate in every one of the
+--   previous three calendar years.
+--
+--   An author with collaborations in t-3 and t-1 but none in t-2 still has
+--   a valid prior-three-year collaboration network.
+--
+-- MAIN NETWORK METRICS
+--
+--   prior3_degree
+--       distinct collaborators during t-3:t-1
+--       = NETWORK REACH
+--
+--   prior3_effective_collaborators
+--       inverse HHI of collaborator-level shared-paper weights
+--       = NETWORK BREADTH
+--
+--   prior3_mean_tie_strength
+--       shared-paper collaboration events / distinct collaborators
+--       = TIE DEPTH
+--
+-- DIAGNOSTIC
+--
+--   prior3_persistent_collaborator_share
+--       share of collaborators appearing in >=2 distinct years
+--
+-- PANEL A ELIGIBILITY
+--
+--   Has a nonempty prior-three-year collaboration network.
+--   Current-year publication is NOT required.
+--
+-- PANEL B ELIGIBILITY
+--
+--   Has a nonempty prior-three-year collaboration network
+--   AND >=1 publication in outcome year t.
+--
+-- =============================================================================
+
+
+
+-- =============================================================================
+-- 1. COLLAPSE AARC AUTHOR-YEAR DATA
+-- =============================================================================
+
+CREATE OR REPLACE TEMP TABLE focal_author_year AS
+
+WITH base AS (
+
+  SELECT
+    author_id,
+    aad_year AS year,
+    phd_type,
+    phd_country,
+    umbrella_domain,
+    InstitutionId,
+    research_intensity_level,
+    research_intensity_label
+
+  FROM `foreign-phd.facultyraw.author_year_dim_v2`
+
+  WHERE aad_year BETWEEN 2011 AND 2020
+    AND author_id IS NOT NULL
+    AND phd_type IN ('domestic', 'foreign')
+),
+
+
+-- ---------------------------------------------------------------------------
+-- PhD type
+-- ---------------------------------------------------------------------------
+
+phd_counts AS (
+
+  SELECT
+    author_id,
+    year,
+    phd_type,
+    COUNT(*) AS n
+
+  FROM base
+
+  GROUP BY
+    author_id,
+    year,
+    phd_type
+),
+
+phd_mode AS (
+
+  SELECT
+    author_id,
+    year,
+    phd_type
+
+  FROM phd_counts
+
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY author_id, year
+    ORDER BY n DESC, phd_type
+  ) = 1
+),
+
+
+-- ---------------------------------------------------------------------------
+-- PhD country
+-- ---------------------------------------------------------------------------
+
+country_counts AS (
+
+  SELECT
+    author_id,
+    year,
+    phd_country,
+    COUNT(*) AS n
+
+  FROM base
+
+  WHERE phd_country IS NOT NULL
+
+  GROUP BY
+    author_id,
+    year,
+    phd_country
+),
+
+country_mode AS (
+
+  SELECT
+    author_id,
+    year,
+    phd_country
+
+  FROM country_counts
+
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY author_id, year
+    ORDER BY n DESC, phd_country
+  ) = 1
+),
+
+
+-- ---------------------------------------------------------------------------
+-- Domain
+-- ---------------------------------------------------------------------------
+
+domain_counts AS (
+
+  SELECT
+    author_id,
+    year,
+    umbrella_domain,
+    COUNT(*) AS n
+
+  FROM base
+
+  WHERE umbrella_domain IS NOT NULL
+
+  GROUP BY
+    author_id,
+    year,
+    umbrella_domain
+),
+
+domain_mode AS (
+
+  SELECT
+    author_id,
+    year,
+    umbrella_domain AS primary_domain
+
+  FROM domain_counts
+
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY author_id, year
+    ORDER BY n DESC, umbrella_domain
+  ) = 1
+),
+
+
+-- ---------------------------------------------------------------------------
+-- Institution
+--
+-- Retained in the output for diagnostics/robustness.
+-- Not used as a main fixed effect in Figure 3.
+-- ---------------------------------------------------------------------------
+
+institution_counts AS (
+
+  SELECT
+    author_id,
+    year,
+    InstitutionId,
+    COUNT(*) AS n
+
+  FROM base
+
+  WHERE InstitutionId IS NOT NULL
+
+  GROUP BY
+    author_id,
+    year,
+    InstitutionId
+),
+
+institution_mode AS (
+
+  SELECT
+    author_id,
+    year,
+    InstitutionId AS primary_institution_id
+
+  FROM institution_counts
+
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY author_id, year
+    ORDER BY n DESC, InstitutionId
+  ) = 1
+),
+
+
+-- ---------------------------------------------------------------------------
+-- Research intensity
+-- ---------------------------------------------------------------------------
+
+research_counts AS (
+
+  SELECT
+    author_id,
+    year,
+    research_intensity_level,
+    research_intensity_label,
+    COUNT(*) AS n
+
+  FROM base
+
+  GROUP BY
+    author_id,
+    year,
+    research_intensity_level,
+    research_intensity_label
+),
+
+research_mode AS (
+
+  SELECT
+    author_id,
+    year,
+    research_intensity_level,
+    research_intensity_label
+
+  FROM research_counts
+
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY author_id, year
+    ORDER BY
+      n DESC,
+      research_intensity_level,
+      research_intensity_label
+  ) = 1
+)
+
+
+SELECT
+  p.author_id,
+  p.year,
+  p.phd_type,
+
+  c.phd_country,
+
+  COALESCE(
+    d.primary_domain,
+    'Unknown'
+  ) AS primary_domain,
+
+  i.primary_institution_id,
+
+  r.research_intensity_level,
+
+  COALESCE(
+    r.research_intensity_label,
+    'Unknown'
+  ) AS research_intensity_label
+
+FROM phd_mode p
+
+LEFT JOIN country_mode c
+  ON p.author_id = c.author_id
+ AND p.year = c.year
+
+LEFT JOIN domain_mode d
+  ON p.author_id = d.author_id
+ AND p.year = d.year
+
+LEFT JOIN institution_mode i
+  ON p.author_id = i.author_id
+ AND p.year = i.year
+
+LEFT JOIN research_mode r
+  ON p.author_id = r.author_id
+ AND p.year = r.year
+;
+
+
+
+-- =============================================================================
+-- 2. FOCAL AUTHORS
+-- =============================================================================
+
+CREATE OR REPLACE TEMP TABLE focal_authors AS
+
+SELECT DISTINCT
+  author_id
+
+FROM focal_author_year
+;
+
+
+
+-- =============================================================================
+-- 3. OPENALEX WORKS CONTAINING FOCAL AUTHORS
+--
+-- Start in 2008:
+--
+--   2011 outcome
+--       <- 2008, 2009, 2010 network
+--
+-- =============================================================================
+
+CREATE OR REPLACE TEMP TABLE focal_works AS
+
+SELECT DISTINCT
+  a.author.id AS focal_author_id,
+  w.id AS work_id,
+  w.publication_year AS year,
+
+  IFNULL(
+    w.citation_normalized_percentile.is_in_top_1_percent,
+    FALSE
+  ) AS is_top1
+
+FROM `subugoe-collaborative.openalex_walden.works` w
+
+CROSS JOIN UNNEST(w.authorships) a
+
+JOIN focal_authors f
+  ON a.author.id = f.author_id
+
+WHERE w.publication_year BETWEEN 2008 AND 2020
+  AND a.author.id IS NOT NULL
+;
+
+
+
+-- =============================================================================
+-- 4. CURRENT-YEAR OUTPUT
+--
+-- Only 2011–2020 are outcome years.
+-- =============================================================================
+
+CREATE OR REPLACE TEMP TABLE output_year AS
+
+SELECT
+  focal_author_id AS author_id,
+  year,
+
+  COUNT(
+    DISTINCT work_id
+  ) AS papers,
+
+  COUNT(
+    DISTINCT IF(
+      is_top1,
+      work_id,
+      NULL
+    )
+  ) AS top1_papers
+
+FROM focal_works
+
+WHERE year BETWEEN 2011 AND 2020
+
+GROUP BY
+  focal_author_id,
+  year
+;
+
+
+
+-- =============================================================================
+-- 5. ALL OPENALEX AUTHORS ON PAPERS CONTAINING FOCAL FACULTY
+--
+-- Collaborators are NOT restricted to AARC faculty.
+-- =============================================================================
+
+CREATE OR REPLACE TEMP TABLE work_authors AS
+
+SELECT DISTINCT
+  w.id AS work_id,
+  a.author.id AS author_id
+
+FROM `subugoe-collaborative.openalex_walden.works` w
+
+CROSS JOIN UNNEST(w.authorships) a
+
+JOIN (
+  SELECT DISTINCT
+    work_id
+  FROM focal_works
+) fw
+  ON w.id = fw.work_id
+
+WHERE a.author.id IS NOT NULL
+;
+
+
+
+-- =============================================================================
+-- 6. FOCAL AUTHOR × YEAR × PAPER × COLLABORATOR
+-- =============================================================================
+
+CREATE OR REPLACE TEMP TABLE focal_collaborations AS
+
+SELECT DISTINCT
+  fw.focal_author_id AS author_id,
+  fw.year,
+  fw.work_id,
+  wa.author_id AS collaborator_id
+
+FROM focal_works fw
+
+JOIN work_authors wa
+  ON fw.work_id = wa.work_id
+
+WHERE wa.author_id != fw.focal_author_id
+;
+
+
+
+-- =============================================================================
+-- 7. AUTHOR × YEAR × COLLABORATOR
+--
+-- tie_weight:
+--   number of distinct shared papers with collaborator j in calendar year y.
+-- =============================================================================
+
+CREATE OR REPLACE TEMP TABLE collaborator_year AS
+
+SELECT
+  author_id,
+  year,
+  collaborator_id,
+
+  COUNT(
+    DISTINCT work_id
+  ) AS tie_weight
+
+FROM focal_collaborations
+
+GROUP BY
+  author_id,
+  year,
+  collaborator_id
+;
+
+
+
+-- =============================================================================
+-- 8. PRIOR-THREE-YEAR COLLABORATOR NETWORK
+--
+-- Outcome year t receives all collaborations in:
+--
+--   t-3
+--   t-2
+--   t-1
+--
+-- Each collaborator appears exactly once per author/outcome-year here.
+-- =============================================================================
+
+CREATE OR REPLACE TEMP TABLE prior3_collaborator AS
+
+SELECT
+  b.author_id,
+  b.year AS outcome_year,
+
+  cy.collaborator_id,
+
+  COUNT(
+    DISTINCT cy.year
+  ) AS collaborator_years,
+
+  SUM(
+    cy.tie_weight
+  ) AS tie_weight
+
+FROM focal_author_year b
+
+JOIN collaborator_year cy
+  ON b.author_id = cy.author_id
+ AND cy.year BETWEEN b.year - 3 AND b.year - 1
+
+GROUP BY
+  b.author_id,
+  outcome_year,
+  cy.collaborator_id
+;
+
+
+
+-- =============================================================================
+-- 9. NETWORK METRICS
+-- =============================================================================
+
+CREATE OR REPLACE TEMP TABLE network3 AS
+
+WITH network_stats AS (
+
+  SELECT
+    author_id,
+    outcome_year,
+
+    -- -------------------------------------------------------------------------
+    -- REACH
+    -- -------------------------------------------------------------------------
+
+    COUNT(*) AS prior3_degree,
+
+
+    -- -------------------------------------------------------------------------
+    -- TOTAL COLLABORATION EVENTS
+    -- -------------------------------------------------------------------------
+
+    SUM(
+      tie_weight
+    ) AS prior3_collaboration_events,
+
+
+    -- -------------------------------------------------------------------------
+    -- HHI COMPONENT
+    -- -------------------------------------------------------------------------
+
+    SUM(
+      POW(
+        CAST(
+          tie_weight AS FLOAT64
+        ),
+        2
+      )
+    ) AS prior3_sum_tie_weight_sq,
+
+
+    -- -------------------------------------------------------------------------
+    -- PERSISTENCE
+    -- -------------------------------------------------------------------------
+
+    COUNTIF(
+      collaborator_years >= 2
+    ) AS prior3_persistent_collaborators
+
+  FROM prior3_collaborator
+
+  GROUP BY
+    author_id,
+    outcome_year
+),
+
+
+network_years AS (
+
+  SELECT
+    b.author_id,
+    b.year AS outcome_year,
+
+    COUNT(
+      DISTINCT cy.year
+    ) AS prior3_active_collaboration_years
+
+  FROM focal_author_year b
+
+  LEFT JOIN collaborator_year cy
+    ON b.author_id = cy.author_id
+   AND cy.year BETWEEN b.year - 3 AND b.year - 1
+
+  GROUP BY
+    b.author_id,
+    outcome_year
+)
+
+
+SELECT
+  n.author_id,
+  n.outcome_year,
+
+
+  -- ---------------------------------------------------------------------------
+  -- NETWORK REACH
+  -- ---------------------------------------------------------------------------
+
+  n.prior3_degree,
+
+  LN(
+    1
+    +
+    CAST(
+      n.prior3_degree AS FLOAT64
+    )
+  ) AS prior3_log_degree,
+
+
+  -- ---------------------------------------------------------------------------
+  -- NETWORK BREADTH
+  --
+  -- Effective number of collaborators:
+  --
+  --          (SUM w_j)^2
+  --     ---------------------
+  --          SUM(w_j^2)
+  --
+  -- Equivalent to inverse HHI.
+  -- ---------------------------------------------------------------------------
+
+  SAFE_DIVIDE(
+
+    POW(
+      CAST(
+        n.prior3_collaboration_events AS FLOAT64
+      ),
+      2
+    ),
+
+    n.prior3_sum_tie_weight_sq
+
+  ) AS prior3_effective_collaborators,
+
+
+  LN(
+    1
+    +
+    SAFE_DIVIDE(
+
+      POW(
+        CAST(
+          n.prior3_collaboration_events AS FLOAT64
+        ),
+        2
+      ),
+
+      n.prior3_sum_tie_weight_sq
+
+    )
+  ) AS prior3_log_effective_collaborators,
+
+
+  -- ---------------------------------------------------------------------------
+  -- TIE DEPTH
+  -- ---------------------------------------------------------------------------
+
+  SAFE_DIVIDE(
+    n.prior3_collaboration_events,
+    n.prior3_degree
+  ) AS prior3_mean_tie_strength,
+
+
+  -- ---------------------------------------------------------------------------
+  -- PERSISTENCE — diagnostic only
+  -- ---------------------------------------------------------------------------
+
+  SAFE_DIVIDE(
+    n.prior3_persistent_collaborators,
+    n.prior3_degree
+  ) AS prior3_persistent_collaborator_share,
+
+  n.prior3_persistent_collaborators,
+
+  n.prior3_collaboration_events,
+
+  y.prior3_active_collaboration_years
+
+FROM network_stats n
+
+LEFT JOIN network_years y
+  ON n.author_id = y.author_id
+ AND n.outcome_year = y.outcome_year
+;
+
+
+
+-- =============================================================================
+-- 10. PRIOR-THREE-YEAR PAPER VOLUME
+--
+-- Retained ONLY for:
+--   descriptive diagnostics
+--   supplementary robustness analyses
+--
+-- It is NOT included in the primary Figure 3 regressions.
+-- =============================================================================
+
+CREATE OR REPLACE TEMP TABLE prior3_output AS
+
+SELECT
+  b.author_id,
+  b.year AS outcome_year,
+
+  COUNT(
+    DISTINCT fw.work_id
+  ) AS prior3_papers
+
+FROM focal_author_year b
+
+LEFT JOIN focal_works fw
+  ON b.author_id = fw.focal_author_id
+ AND fw.year BETWEEN b.year - 3 AND b.year - 1
+
+GROUP BY
+  b.author_id,
+  outcome_year
+;
+
+
+
+-- =============================================================================
+-- 11. FINAL AUTHOR-YEAR TABLE
+-- =============================================================================
+
+CREATE OR REPLACE TABLE
+  `foreign-phd.facultyraw.figure3_openalex_final`
+
+PARTITION BY year_date
+CLUSTER BY
+  author_id,
+  phd_type AS
+
+SELECT
+  b.author_id,
+  b.year,
+
+  DATE(
+    b.year,
+    1,
+    1
+  ) AS year_date,
+
+
+  -- ---------------------------------------------------------------------------
+  -- TRAINING / FACULTY CHARACTERISTICS
+  -- ---------------------------------------------------------------------------
+
+  b.phd_type,
+  b.phd_country,
+  b.primary_domain,
+  b.primary_institution_id,
+  b.research_intensity_level,
+  b.research_intensity_label,
+
+
+  -- ---------------------------------------------------------------------------
+  -- CURRENT-YEAR OPENALEX OUTCOME
+  -- ---------------------------------------------------------------------------
+
+  IFNULL(
+    o.papers,
+    0
+  ) AS papers,
+
+  IFNULL(
+    o.top1_papers,
+    0
+  ) AS top1_papers,
+
+  SAFE_DIVIDE(
+    o.top1_papers,
+    o.papers
+  ) AS top1_rate,
+
+
+  -- ---------------------------------------------------------------------------
+  -- PRIOR-THREE-YEAR PRODUCTIVITY
+  --
+  -- Diagnostic / robustness only.
+  -- ---------------------------------------------------------------------------
+
+  IFNULL(
+    p.prior3_papers,
+    0
+  ) AS prior3_papers,
+
+  LN(
+    1
+    +
+    CAST(
+      IFNULL(
+        p.prior3_papers,
+        0
+      )
+      AS FLOAT64
+    )
+  ) AS prior3_log_papers,
+
+
+  -- ---------------------------------------------------------------------------
+  -- NETWORK REACH
+  -- ---------------------------------------------------------------------------
+
+  n.prior3_degree,
+  n.prior3_log_degree,
+
+
+  -- ---------------------------------------------------------------------------
+  -- NETWORK BREADTH
+  -- ---------------------------------------------------------------------------
+
+  n.prior3_effective_collaborators,
+  n.prior3_log_effective_collaborators,
+
+
+  -- ---------------------------------------------------------------------------
+  -- TIE DEPTH
+  -- ---------------------------------------------------------------------------
+
+  n.prior3_mean_tie_strength,
+
+
+  -- ---------------------------------------------------------------------------
+  -- PERSISTENCE — diagnostic
+  -- ---------------------------------------------------------------------------
+
+  n.prior3_persistent_collaborator_share,
+  n.prior3_persistent_collaborators,
+
+
+  -- ---------------------------------------------------------------------------
+  -- ADDITIONAL NETWORK DIAGNOSTICS
+  -- ---------------------------------------------------------------------------
+
+  n.prior3_collaboration_events,
+  n.prior3_active_collaboration_years,
+
+
+  -- ---------------------------------------------------------------------------
+  -- PANEL A
+  --
+  -- No requirement to publish in outcome year.
+  -- ---------------------------------------------------------------------------
+
+  IF(
+    n.prior3_degree IS NOT NULL
+    AND n.prior3_degree > 0,
+    1,
+    0
+  ) AS panel_a_eligible,
+
+
+  -- ---------------------------------------------------------------------------
+  -- PANEL B
+  --
+  -- Must have:
+  --   prior network
+  --   >=1 current-year paper
+  -- ---------------------------------------------------------------------------
+
+  IF(
+    n.prior3_degree IS NOT NULL
+    AND n.prior3_degree > 0
+    AND IFNULL(o.papers, 0) > 0,
+    1,
+    0
+  ) AS panel_b_eligible
+
+
+FROM focal_author_year b
+
+LEFT JOIN output_year o
+  ON b.author_id = o.author_id
+ AND b.year = o.year
+
+LEFT JOIN prior3_output p
+  ON b.author_id = p.author_id
+ AND b.year = p.outcome_year
+
+LEFT JOIN network3 n
+  ON b.author_id = n.author_id
+ AND b.year = n.outcome_year
+;
+
+
+
+-- =============================================================================
+-- 12. FINAL DIAGNOSTICS
+-- =============================================================================
+
+SELECT
+  phd_type,
+
+  COUNT(*) AS all_author_years,
+
+  COUNT(
+    DISTINCT author_id
+  ) AS all_authors,
+
+
+  -- ---------------------------------------------------------------------------
+  -- PANEL A
+  -- ---------------------------------------------------------------------------
+
+  COUNTIF(
+    panel_a_eligible = 1
+  ) AS panel_a_author_years,
+
+  COUNT(
+    DISTINCT IF(
+      panel_a_eligible = 1,
+      author_id,
+      NULL
+    )
+  ) AS panel_a_authors,
+
+
+  -- ---------------------------------------------------------------------------
+  -- PANEL B
+  -- ---------------------------------------------------------------------------
+
+  COUNTIF(
+    panel_b_eligible = 1
+  ) AS panel_b_author_years,
+
+  COUNT(
+    DISTINCT IF(
+      panel_b_eligible = 1,
+      author_id,
+      NULL
+    )
+  ) AS panel_b_authors,
+
+
+  -- ---------------------------------------------------------------------------
+  -- OUTCOME
+  -- ---------------------------------------------------------------------------
+
+  SUM(
+    IF(
+      panel_b_eligible = 1,
+      papers,
+      0
+    )
+  ) AS panel_b_papers,
+
+  SUM(
+    IF(
+      panel_b_eligible = 1,
+      top1_papers,
+      0
+    )
+  ) AS panel_b_top1_papers,
+
+  SAFE_DIVIDE(
+
+    SUM(
+      IF(
+        panel_b_eligible = 1,
+        top1_papers,
+        0
+      )
+    ),
+
+    SUM(
+      IF(
+        panel_b_eligible = 1,
+        papers,
+        0
+      )
+    )
+
+  ) AS panel_b_top1_rate,
+
+
+  -- ---------------------------------------------------------------------------
+  -- NETWORK
+  -- ---------------------------------------------------------------------------
+
+  AVG(
+    IF(
+      panel_a_eligible = 1,
+      prior3_degree,
+      NULL
+    )
+  ) AS degree_mean,
+
+  APPROX_QUANTILES(
+    IF(
+      panel_a_eligible = 1,
+      prior3_degree,
+      NULL
+    ),
+    100
+  )[SAFE_OFFSET(50)]
+    AS degree_median,
+
+  AVG(
+    IF(
+      panel_a_eligible = 1,
+      prior3_effective_collaborators,
+      NULL
+    )
+  ) AS breadth_mean,
+
+  AVG(
+    IF(
+      panel_a_eligible = 1,
+      prior3_mean_tie_strength,
+      NULL
+    )
+  ) AS tie_depth_mean,
+
+  AVG(
+    IF(
+      panel_a_eligible = 1,
+      prior3_persistent_collaborator_share,
+      NULL
+    )
+  ) AS persistence_mean,
+
+  AVG(
+    IF(
+      panel_a_eligible = 1,
+      prior3_active_collaboration_years,
+      NULL
+    )
+  ) AS active_network_years_mean,
+
+  AVG(
+    IF(
+      panel_a_eligible = 1,
+      prior3_papers,
+      NULL
+    )
+  ) AS prior3_papers_mean
+
+
+FROM
+  `foreign-phd.facultyraw.figure3_openalex_final`
+
+GROUP BY
+  phd_type
+
+ORDER BY
+  phd_type
+;
